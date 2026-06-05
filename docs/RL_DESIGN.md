@@ -194,3 +194,72 @@ Run phases sequentially with `/clear` and a review between each. Do not start P3
 - **Game source (read-only reference):** `C:\Users\moham\OneDrive\Documents\Intro to Greatness\HT6-chef\ht6-chefoverflow-main\ht6-chefoverflow-main\` — `game.js`, `api/`, `supabase/migrations/`.
 - **Project (build here):** `C:\Users\moham\OneDrive\Documents\Intro to Greatness\chef-overflow-autopilot\`
 - Copy `game.js` → `chef-overflow-autopilot\reference\game.js` and gitignore `reference/` (their copyright — local reference only, never committed).
+
+## 11. Phase 1 Findings (refine / override the spec)
+
+Established while building and validating the simulator (`sim/`, 63 fidelity tests
+passing against `reference/game.js`). Where these conflict with §1–§9 above, **these
+win** — the spec was written before the source was fully read.
+
+1. **VIP is unobservable — do NOT target it.** The real `getState()` exposes neither
+   `order.vip` nor a stand's `customer`; the order objects it returns are
+   `{id, dish, timeLeft, standId, components}` only (verified `game.js:3431` and
+   `:3414`). The §3.12 / §5.3 / §7 instruction to "prioritize VIP" is therefore
+   **void** — an honest agent cannot see VIP, so it must not branch on it. The
+   `vip` observation slot stays hard-0 (`encode.py`). VIP's 1.5× upside is captured
+   *implicitly* by delivering every order as fast as possible (which also maximizes
+   the `2*timeLeft` term and protects streak). The simulator still tracks `vip`
+   internally for faithful scoring; the policy/planner just never reads it.
+
+2. **No-stand-slot is a distinct failure.** When `spawnOrder()` fires and all 5
+   stands are occupied (`!order && !customer` false for every stand), in a
+   high-pressure phase (automation/endurance) it calls `failOrderNoStandSlot()`:
+   **−50, streak→0, and `failedOrders++`** (counts toward the 3-strike game-over).
+   In tutorial/ramp the spawn is simply skipped (no penalty). Because a correct
+   delivery parks a **customer on the stand for 10s** (`customer.timeLeft = 10`,
+   `game.js:1393`) *after* the order clears, stands stay busy well past delivery.
+   **Keeping stands flowing is a hard constraint**; in late game, stand
+   availability — not chef labor — is often the binding bottleneck. The planner
+   must deliver promptly and avoid letting all 5 stands clog.
+
+3. **Failure hierarchy (expiry ≫ wrong delivery).**
+   - **Expiry:** −50, streak→0, **and a strike** (`failedOrders++`). Three strikes
+     end the run. Strictly the worst outcome.
+   - **No-stand-slot:** same as expiry (−50, streak→0, strike) but only in
+     high-pressure phases.
+   - **Wrong delivery:** streak→0 **and the chef's hands are cleared** (the
+     assembled ingredients are destroyed), but **no penalty and no strike**
+     (`game.js:1401`). Bad, but recoverable.
+   Ranking: avoid expiry first, no-slot second, wrong-delivery third. The planner
+   must **never deliver a plate that isn't an exact match**, and should prefer
+   trashing a mismatched plate over risking a wrong delivery.
+
+4. **Geometry — travel dominates.** Bins line `x=1` (tomato y3, lettuce y5, onion
+   y7, meat y9, dough y11; cheese at `(3,11)`); stoves sit along the top at
+   `(4,1)(6,1)(8,1)`; cutting boards at `(5,5)(8,5)`; plating areas at
+   `(10,5)(10,8)(11,5)` plus a far-left one at `(3,5)`; the 5 stands are all at
+   `x=17` (`y=3,5,7,9,11`); trash at `(3,9)`. Walk speed is `MOVE_DELAY=0.18 s/tile`
+   (`game.js:31`) — ~3 s to cross the kitchen, comparable to a 4 s cook or 2 s chop.
+   **Implications the planner uses:** assemble at the right-side plating areas
+   (`plating_0/1/2` ≈ x10–11, near the stands) so the delivery haul is short; reserve
+   the far-left `plating_3` (3,5) for bin-side staging/overflow; always pick the
+   *nearest* free station and the *nearest* idle chef; and fire **boost** (3.5 s at
+   ×0.5 move, 12 s cooldown — `game.js:3194`) on the long plating→stand delivery
+   haul.
+
+5. **Commitment stall = 1.5 s, narrowly triggered.** `assignChefPath`
+   (`game.js:1182`) sets `commitmentStall = 1.5` **only** when a chef is redirected
+   while *in transit with ≥3 path tiles remaining* **and** its `targetStation.id`
+   changes. Consequences the planner relies on: only ever command **idle** chefs
+   (empty path) — they can never stall; **never** re-issue a command to a chef that
+   already `hasPath`; re-targeting a chef that is essentially arrived (<3 tiles) is
+   free. This makes per-tick command spam safe *iff* gated on idle-only.
+
+6. **Spawning is uniform over the current pool.** `rollUpcomingOrder()` picks the
+   dish with `Math.floor(Math.random()*pool.length)` — **uniform** over the phase's
+   unlocked recipes. The static per-recipe `difficulty` field is **display-only**
+   (surfaced by `getRecipes()`), not a spawn weight and not the score multiplier
+   (that's the time-based `GameState.difficulty`). The planner must not assume rare
+   dishes are scored higher: base score is `100 × difficulty(time)` regardless of
+   dish, so **simpler dishes are strictly more point-efficient** (same base, less
+   labor) — a useful triage bias.
