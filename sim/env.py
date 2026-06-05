@@ -1,10 +1,25 @@
 """
 Chef Overflow simulator (Phase 1).
 
-``KitchenSim`` is a faithful, headless, deterministic port of ``reference/game.js``
-(§3 of the design spec): same map, pathfinding, station interactions, order
-spawning/timers, difficulty curve, rubber-band, rush/VIP, scoring, and the
-commitment stall.  All randomness flows through one seeded RNG.
+``KitchenSim`` is a faithful, headless, deterministic port of the live game. The
+game is now split into two reference layers and the sim mirrors BOTH:
+
+* **Scoring / spawning / order lifecycle / difficulty / rush / VIP** come from
+  ``reference/core.js`` — the deterministic core the server replays for
+  anti-cheat, and the authoritative scorekeeper.  core.js models NO movement: it
+  applies interactions immediately at their stamped tick.  Our scoring path is
+  cross-checked bit-for-bit against it (``tools/xcheck_core.py`` / ``_e2e.py``).
+* **Movement / pathfinding (A*) / tile-reservation collisions / blocked-chef
+  repath+abandon / commitment stall / boost** come from ``reference/game.js``'s
+  client control layer (core.js omits all of this).  The live game does the
+  walking and only emits an ``interact`` event when a chef physically reaches a
+  station; we reproduce that walking so interaction *timing* — and the
+  chokepoint deadlocks it causes — transfer to a policy trained here.
+
+Same map, pathfinding, station interactions, order spawning/timers, difficulty
+curve, rubber-band, rush/VIP, scoring, and the commitment stall.  All randomness
+flows through one seeded RNG (independent of the server's seed: identical
+distributions, not an identical sequence — only distributions transfer).
 
 ``ChefOverflowEnv`` wraps the sim as the event-driven semi-MDP of §5.1: the sim is
 advanced and the policy is queried only when a chef goes idle.  One decision chef
@@ -51,6 +66,7 @@ class KitchenSim:
     def _reset_state(self, seed: int):
         self.rng = random.Random(seed)
         self.seed = seed
+        self.tick_count = 0          # integer step index (core.js gs.tick)
         self.time = 0.0
         self.score = 0.0
         self.difficulty = 1.0
@@ -80,9 +96,6 @@ class KitchenSim:
         self._init_chefs()
 
         self._refill_upcoming_queue()
-
-        # Two scripted initial spawns (setTimeout 1000/3000ms in game.js:3257).
-        self._initial_spawns_done = [False, False]
 
     def _build_stations(self):
         self.ingredient_bins = [
@@ -212,9 +225,13 @@ class KitchenSim:
 
     # -- main update loop --------------------------------------------------
     def tick(self, dt: float):
-        """Port of update(dt) (game.js:1540)."""
+        """One fixed timestep. Mirrors core.js step() ordering: advance the tick
+        clock, recompute difficulty, endurance trickle, rush, debt-spawns, the
+        scripted tick-60/180 spawns, then chefs (game.js movement) / stations /
+        orders."""
         if not self.running or self.paused:
             return
+        self.tick_count += 1
         self.time += dt
         self.difficulty = C.compute_difficulty(self.time, self._perf())
 
@@ -249,14 +266,6 @@ class KitchenSim:
                     if not self._spawn_order():
                         break
 
-        # scripted initial spawns (setTimeout in the browser)
-        if not self._initial_spawns_done[0] and self.time >= C.INITIAL_SPAWN_TIMES[0]:
-            self._initial_spawns_done[0] = True
-            self._spawn_order()
-        if not self._initial_spawns_done[1] and self.time >= C.INITIAL_SPAWN_TIMES[1]:
-            self._initial_spawns_done[1] = True
-            self._spawn_order()
-
         # debt-accumulator spawner
         self._refill_upcoming_queue()
         spawn_every = C.base_spawn_interval(self.time, self.rush["active"], self._perf())
@@ -267,6 +276,13 @@ class KitchenSim:
                 break
             self.order_spawn_debt -= 1
             spawns_this_frame += 1
+
+        # Scripted early spawns — core.js fires these at EXACT ticks 60 & 180 as
+        # extra spawns (they do not consume orderSpawnDebt), after the debt loop.
+        # Gating on the integer tick matches core.js to the tick (a float
+        # ``time >= 3.0`` check lands a tick late at tick 181 due to fp drift).
+        if self.tick_count in C.INITIAL_SPAWN_TICKS:
+            self._spawn_order()
         self._recompute_upcoming_etas()
 
         # chefs, stations, orders

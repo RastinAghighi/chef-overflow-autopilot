@@ -2,10 +2,17 @@
 Chef Overflow — extracted constants and formulas (spec section 3).
 
 Single source of truth for every magic number and formula used by the simulator.
-Values marked ``# [extract] game.js:<line>`` were read directly out of
-``reference/game.js`` (the read-only ground truth) at the cited line; formulas are
-re-expressed in Python rather than copied verbatim. Values marked ``# [confirmed]``
-were already pinned in the design spec and verified against the source.
+
+AUTHORITATIVE SOURCE (2026 update): the live game now runs a deterministic
+``reference/core.js`` that the server replays for anti-cheat; it — not the old
+``game.js`` — is the authoritative scorekeeper / order manager. Every scoring,
+spawn, difficulty, order-timer, VIP and rush formula below has been cross-checked
+bit-for-bit against ``core.js`` (see ``tools/xcheck_core.py``: 11k+ exact checks,
+and ``tools/xcheck_e2e.py``: full pipelines driven through the real core). The
+``# [extract] game.js:<line>`` cites point at the OLD game.js line numbers our
+port was first written against; the values themselves are confirmed current.
+``game.js`` remains the source ONLY for the movement/collision/pathing control
+layer (core.js models no movement — it applies interactions at stamped ticks).
 
 JavaScript ``Math.round`` rounds halves toward +inf (``floor(x + 0.5)``) whereas
 Python's ``round`` is banker's rounding; the source uses ``Math.round`` when
@@ -250,9 +257,14 @@ MAX_FAILED_ORDERS = 3        # [confirmed] game.js:29
 EXPIRE_PENALTY = 50          # [extract] game.js:1775 (applied as -50)
 NO_STAND_SLOT_PENALTY = 50   # [extract] game.js:941   (applied as -50, high-pressure only)
 
-UPCOMING_QUEUE_SIZE = 3      # [extract] game.js:946
-MAX_SPAWNS_PER_FRAME = 2     # [extract] game.js:1599
-INITIAL_SPAWN_TIMES = (1.0, 3.0)  # [extract] game.js:3257-3258 (setTimeout 1000/3000 ms)
+UPCOMING_QUEUE_SIZE = 3      # [extract] game.js:946 / core.js UPCOMING_QUEUE_SIZE
+MAX_SPAWNS_PER_FRAME = 2     # [extract] core.js step(): maxSpawnsPerFrame
+# Scripted early spawns. game.js's old setTimeout(spawnOrder, 1000/3000) was moved
+# into core.js, which fires them at the EXACT integer ticks 60 and 180 (= 1.0s,
+# 3.0s) as extra spawns that do NOT consume orderSpawnDebt.  We gate on the tick
+# index (not a float time threshold) to match core.js to the tick.
+INITIAL_SPAWN_TICKS = (60, 180)   # [extract] core.js step(): if (tick===60||tick===180)
+INITIAL_SPAWN_TIMES = (1.0, 3.0)  # informational: INITIAL_SPAWN_TICKS * DT
 
 # Rush — [extract] game.js:35, 1564-1592, 3238
 RUSH_INITIAL_COOLDOWN = 20.0
