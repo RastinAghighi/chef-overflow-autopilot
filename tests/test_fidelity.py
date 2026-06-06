@@ -13,6 +13,7 @@ import math
 import os
 import sys
 
+import numpy as np
 import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -496,22 +497,57 @@ def test_different_seeds_diverge():
     assert len({run(1), run(2), run(3), run(4)}) > 1
 
 
-def test_encoder_dims_and_mask_appended():
+def test_encoder_dims_and_mask_not_appended():
+    # Phase 3 contract: the obs is exactly the feature vector (mask is NOT appended;
+    # it flows through env.action_masks()).  OBS_DIM == FEATURE_DIM.
     sim = KitchenSim(seed=9)
     sim.reset(seed=9)
     state = sim.get_state()
     obs = E.encode(state, 0)
     assert obs.shape == (E.OBS_DIM,)
+    assert E.OBS_DIM == E.FEATURE_DIM
     assert obs.dtype.name == "float32"
-    # The last NUM_ACTIONS entries are the action mask.
+    assert np.isfinite(obs).all()
+    # The mask is no longer concatenated onto the observation tail.
     mask = E.action_mask(state, 0)
-    assert (obs[-E.NUM_ACTIONS:] == mask).all()
+    assert not np.array_equal(obs[-E.NUM_ACTIONS:], mask)
     # At reset, an empty-handed chef can FETCH and WAIT but not DELIVER/CHOP/COOK.
     assert mask[E.FETCH_BASE + 3] == 1.0   # FETCH meat
     assert mask[E.ACT_WAIT] == 1.0
     assert mask[E.ACT_CHOP] == 0.0
     assert mask[E.ACT_COOK] == 0.0
     assert mask[E.DELIVER_BASE] == 0.0
+
+
+def test_encoder_upcoming_orders_block():
+    # The new anticipation block encodes the next UPCOMING_K dishes (one-hot) + eta.
+    sim = KitchenSim(seed=9)
+    sim.reset(seed=9)
+    sim.advance(2.0, dt=DT)
+    state = sim.get_state()
+    upcoming = state["upcomingOrders"]
+    assert len(upcoming) == E.UPCOMING_K                  # queue kept topped up
+    obs = E.encode(state, 0)
+    block = obs[E.OBS_DIM - E.UPCOMING_DIM:]              # upcoming is the final block
+    for k, u in enumerate(upcoming):
+        off = k * E.PER_UPCOMING_DIM
+        di = C.DISH_INDEX[u["dish"]]
+        assert block[off + di] == 1.0                    # dish one-hot set
+        eta_slot = block[off + len(C.DISH_NAMES)]
+        assert 0.0 <= eta_slot <= 1.0                    # eta normalized + clamped
+        if u["etaSeconds"] < E.UPCOMING_ETA_NORM:
+            assert eta_slot == pytest.approx(u["etaSeconds"] / E.UPCOMING_ETA_NORM)
+
+
+def test_env_action_masks_method_matches_encoder():
+    from sim.env import ChefOverflowEnv
+    env = ChefOverflowEnv(seed=9, time_cap=120.0)
+    env.reset(seed=9)
+    am = env.action_masks()
+    assert am.shape == (E.NUM_ACTIONS,)
+    assert am.dtype == np.bool_
+    expected = E.action_mask(env.sim.get_state(), env.decision_chef).astype(bool)
+    assert np.array_equal(am, expected)
 
 
 def test_mask_cook_and_chop_gating():

@@ -4,3 +4,9 @@ __pycache__/
 *.pyc
 *.onnx
 docs/
+
+# Phase 3 training artifacts (large / regenerable)
+train/runs/
+*.zip
+*.pth
+*.pt

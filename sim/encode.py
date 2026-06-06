@@ -7,11 +7,24 @@ deploy-time vectors are bit-for-bit identical.  ``encode`` and ``action_mask``
 take a *state dict shaped exactly like the game's ``KitchenAPI.getState()``* plus
 the index of the decision chef — nothing here may read anything the real
 ``getState()`` does not expose (otherwise the policy would silently break on the
-live site).
+live site).  This module stays pure-numpy (no SB3/torch) precisely so Phase 4 can
+port it 1:1 to JS; the *only* normalization the policy ever sees is the one baked
+in here (we deliberately do NOT wrap the env in VecNormalize, which would add a
+running-stats layer the JS deploy could not reproduce).
 
 Important fidelity note: the real ``getState()`` does **not** expose
 ``order.vip``.  The vip feature slots below are therefore always 0 for parity;
 see the build report.  (The simulator still tracks vip internally for scoring.)
+
+Phase 3 changes (vs the original spec 5.2):
+    * ADDED ``upcomingOrders`` — the next ``UPCOMING_K`` dishes (one-hot) and their
+      ``etaSeconds``.  Both fields are exposed by the live ``getState()``
+      (game.js:3778 maps ``upcomingOrders -> {dish, components, etaSeconds}``); we
+      read only dish+eta.  This is what lets the policy learn to *anticipate* /
+      pre-stage instead of reacting purely to already-spawned orders.
+    * The action mask is NO LONGER appended to the observation.  It is supplied to
+      MaskablePPO out-of-band via ``ChefOverflowEnv.action_masks()`` (spec 5.3's
+      "apply to the policy logits").  The obs is exactly the feature vector.
 
 Action space (23 macros, spec 5.3):
     0..5   FETCH_{tomato,lettuce,onion,meat,dough,cheese}
@@ -140,11 +153,20 @@ ORDER_K = 6                                        # spec 5.2 cap
 PER_ORDER_DIM = 1 + len(C.DISH_NAMES) + 1 + C.NUM_STANDS + 1   # present,dish(7),t,stand(5),vip
 ORDERS_DIM = PER_ORDER_DIM * ORDER_K
 
+# Upcoming orders (Phase 3 anticipation).  The queue is kept topped to
+# UPCOMING_QUEUE_SIZE, so all slots are normally present; short queues pad to zero.
+UPCOMING_K = C.UPCOMING_QUEUE_SIZE                  # 3
+PER_UPCOMING_DIM = len(C.DISH_NAMES) + 1           # dish one-hot(7) + etaSeconds
+UPCOMING_DIM = PER_UPCOMING_DIM * UPCOMING_K
+UPCOMING_ETA_NORM = 30.0                           # seconds; eta clamps to [0,1]
+
 FEATURE_DIM = (
     GLOBAL_DIM + DECISION_DIM + CHEFS_DIM
-    + STOVES_DIM + BOARDS_DIM + PLATING_DIM + ORDERS_DIM
+    + STOVES_DIM + BOARDS_DIM + PLATING_DIM + ORDERS_DIM + UPCOMING_DIM
 )
-OBS_DIM = FEATURE_DIM + NUM_ACTIONS   # spec: append the action mask
+# Phase 3: the mask is NOT appended — it flows through env.action_masks().  The
+# observation is exactly the normalized feature vector.
+OBS_DIM = FEATURE_DIM
 
 
 def _encode_holding(holding, out, off):
@@ -260,9 +282,18 @@ def encode(state, decision_chef: int) -> np.ndarray:
             out[off + 1 + len(C.DISH_NAMES) + 1 + C.NUM_STANDS] = float(o.get("vip", 0))
         off += PER_ORDER_DIM
 
-    # --- Appended action mask -------------------------------------------
-    out[off:off + NUM_ACTIONS] = action_mask(state, decision_chef)
-    off += NUM_ACTIONS
+    # --- Upcoming orders (anticipation, Phase 3) -------------------------
+    # Next UPCOMING_K dishes the game will spawn, each: dish one-hot(7) + eta.
+    upcoming = state.get("upcomingOrders", []) or []
+    for k in range(UPCOMING_K):
+        if k < len(upcoming):
+            u = upcoming[k]
+            di = C.DISH_INDEX.get(u.get("dish"))
+            if di is not None:
+                out[off + di] = 1.0
+            out[off + len(C.DISH_NAMES)] = min(
+                max(float(u.get("etaSeconds", 0.0)), 0.0) / UPCOMING_ETA_NORM, 1.0)
+        off += PER_UPCOMING_DIM
 
     assert off == OBS_DIM, (off, OBS_DIM)
     return out

@@ -32,6 +32,7 @@ The two classes are deliberately split: the sim is the ground-truth mechanics
 
 import math
 import random
+from collections import Counter
 
 import numpy as np
 
@@ -765,8 +766,55 @@ class ChefOverflowEnv(_EnvBase):
     metadata = {"render_modes": []}
 
     def __init__(self, seed: int = 0, time_cap: float = C.DEFAULT_TIME_CAP,
-                 dt: float = 1.0 / 60.0, p_expiry: float = 300.0, p_wrong: float = 300.0,
-                 c_time: float = 0.0, reward_scale: float = 1.0):
+                 dt: float = 1.0 / 60.0, p_expiry: float = 500.0, p_wrong: float = 250.0,
+                 c_time: float = 0.0, reward_scale: float = 0.01,
+                 randomize_on_reset: bool = False, decision_min_dwell: float = 0.4,
+                 shaping_coef: float = 0.0):
+        """Event-driven semi-MDP over the sim.
+
+        Reward (spec 5.4, Phase-3 defaults): ``reward_scale * (delta_score
+        - p_expiry*expiries - p_wrong*wrongs - c_time)``.  ``delta_score`` already
+        carries the game's own −50 on an expiry/no-slot, so an expiry nets
+        ``−50 − p_expiry`` while a wrong delivery (no game penalty) nets ``−p_wrong``;
+        with ``p_expiry > p_wrong`` expiry is strictly worse, as required.  An expiry
+        is *also* a strike, so its largest cost is the lost future return when the
+        episode ends early.  ``reward_scale`` keeps magnitudes ~O(1–10) for PPO
+        stability without a running normalizer (which would break encoder parity for
+        the Phase-4 JS deploy — so NO VecNormalize; the encoder is the only norm).
+
+        ``randomize_on_reset``: for training, draw a fresh sim seed from a per-env
+        meta-RNG on every ``reset(seed=None)`` so the 16–32 vec envs see diverse
+        episodes (and auto-resets keep diverging) instead of replaying one seed.
+        Evaluation passes explicit seeds, which are always honored verbatim.
+
+        ``decision_min_dwell``: the minimum sim-time (s) advanced per ``step``.  The
+        decision model (spec §5.1) only queries the policy when a chef is idle, but a
+        naive "query every frame an idle chef exists" explodes the episode into
+        ~``time_cap/dt`` ~1-tick steps whenever the policy WAITs, a command fails in
+        the congested kitchen, or an interaction completes instantly (the chef stays
+        idle and is re-offered next frame).  Requiring ≥``min_dwell`` of sim time
+        between decisions bounds an episode to ~``time_cap/min_dwell`` steps and adds
+        only a ≤``min_dwell`` reaction latency (negligible against 2–8 s tasks /
+        0.18 s-per-tile travel).  It is a decision-cadence knob on the RL formulation,
+        not a change to the fidelity-pinned :class:`KitchenSim` mechanics.
+
+        ``shaping_coef`` (0 = pure sparse, spec §5.4 default): a sub-task reward the
+        design (§5.4) sanctions "only if learning stalls" — and pure-sparse PPO *does*
+        stall here, collapsing to "do nothing" (assembling one correct plate is a
+        ~5–7-step per-chef sequence yielding zero reward until delivery, so the policy
+        never stumbles on it and just learns to dodge the wrong-delivery penalty).
+        Φ(s) counts how many *demanded* recipe components currently exist in their
+        needed state anywhere in the world (deposited on an area, held by a chef, or in
+        a held plate), capped by total demand.  We reward only the *increase* —
+        ``shaping_coef·max(0, Φ'−Φ)`` (a "ratchet", not a telescoping potential) — so
+        producing a needed cooked/chopped/raw-usable component is a net-positive
+        breadcrumb that is *never* clawed back when an order later expires or a plate is
+        delivered.  That net incentive is what bootstraps *exploration* toward assembly
+        — a policy-invariant potential cannot, since it only re-credits trajectories the
+        policy already completes (and the pure-sparse policy completes none).  The
+        demand cap keeps it farm-resistant, and the real delivery score still dwarfs the
+        breadcrumbs, so it guides rather than dominates.
+        """
         super().__init__()
         self.sim = KitchenSim(seed)
         self.time_cap = time_cap
@@ -775,9 +823,13 @@ class ChefOverflowEnv(_EnvBase):
         self.p_wrong = p_wrong
         self.c_time = c_time
         self.reward_scale = reward_scale
+        self.randomize_on_reset = randomize_on_reset
+        self.decision_min_dwell = decision_min_dwell
+        self.shaping_coef = shaping_coef
         self._seed = seed
+        self._meta_rng = random.Random(seed)   # draws training seeds, reproducibly
         self.decision_chef = 0
-        self._decidable_queue = []
+        self._decide_ptr = 0                    # rotates which idle chef is offered (fairness)
 
         if _HAS_GYM:
             self.action_space = spaces.Discrete(E.NUM_ACTIONS)
@@ -793,6 +845,29 @@ class ChefOverflowEnv(_EnvBase):
 
     def _frame_decidable(self):
         return [i for i in range(C.NUM_CHEFS) if self._is_decidable(i)]
+
+    def _pick_decision_chef(self, idle):
+        """Pick the next idle chef to command, rotating a pointer so no chef is
+        starved if another keeps choosing WAIT (the reward already discourages that,
+        but rotation keeps the cadence fair and deterministic)."""
+        self._decide_ptr = (self._decide_ptr + 1) % C.NUM_CHEFS
+        return min(idle, key=lambda i: (i - self._decide_ptr) % C.NUM_CHEFS)
+
+    def _advance_to_decision(self, max_ticks):
+        """Tick the sim forward until ≥``decision_min_dwell`` of sim time has elapsed
+        AND some chef is idle, or the episode ends / hits the cap.  Returns
+        ``(next_chef_or_None, ticks_advanced)``."""
+        ticks = 0
+        target_time = self.sim.time + self.decision_min_dwell
+        while True:
+            if self.sim.time >= target_time:
+                idle = self._frame_decidable()
+                if idle:
+                    return self._pick_decision_chef(idle), ticks
+            if self.sim.game_over or self.sim.time >= self.time_cap or ticks >= max_ticks:
+                return None, ticks
+            self.sim.tick(self.dt)
+            ticks += 1
 
     def _target_for_action(self, action: int, mask: np.ndarray):
         """Resolve a macro to a (chef stays) station id, or None for WAIT/no-op."""
@@ -831,36 +906,85 @@ class ChefOverflowEnv(_EnvBase):
     def _obs(self):
         return E.encode(self.sim.get_state(), self.decision_chef)
 
+    def action_masks(self) -> np.ndarray:
+        """Validity mask (23 bools) for the *current* decision chef.
+
+        MaskablePPO pulls this out-of-band (``env.env_method('action_masks')``) and
+        applies it to the policy logits, so invalid macros (e.g. COOK with nothing in
+        hand) get zero probability and never waste rollout samples.  It is always
+        consistent with the obs returned by the matching ``reset``/``step`` because
+        both read the same ``decision_chef``.
+        """
+        return E.action_mask(self.sim.get_state(), self.decision_chef).astype(bool)
+
+    def _progress_potential(self) -> float:
+        """Φ(s) for the assembly-progress shaping: how many *demanded* recipe
+        components currently exist in the world, capped by total demand.  Demand is the
+        multiset of components across all active orders; supply is every component
+        already in its needed state — deposited on a plating area, held by a chef, or in
+        a held plate.  ``min(supply, demand)`` per component type bounds it (no reward
+        for a junk stack the orders don't want), keeping it farm-resistant.  Reaching a
+        needed cooked/chopped/raw-usable state — the hard, multi-step part of a dish — is
+        exactly what raises Φ.  Returns 0 when shaping is off so the hot path stays free."""
+        if self.shaping_coef == 0.0:
+            return 0.0
+        orders = self.sim.orders
+        if not orders:
+            return 0.0
+        demand = Counter()
+        for o in orders:
+            for c in o["components"]:
+                demand[(c["ingredient"], c["state"])] += 1
+        supply = Counter()
+        for a in self.sim.plating_areas:
+            for it in a["items"]:
+                supply[(it.get("ingredient"), it.get("state"))] += 1
+        for chef in self.sim.chefs:
+            h = chef["holding"]
+            if h is None:
+                continue
+            if h.get("type") == "plate":
+                for it in h.get("items") or []:
+                    supply[(it.get("ingredient"), it.get("state"))] += 1
+            else:
+                supply[(h.get("ingredient"), h.get("state"))] += 1
+        return float(sum(min(supply[c], d) for c, d in demand.items()))
+
     def _info(self):
         return {
             "action_mask": E.action_mask(self.sim.get_state(), self.decision_chef),
             "decision_chef": self.decision_chef,
             "score": self.sim.score,
-            "time": self.sim.time,
+            "sim_time": self.sim.time,        # survival time (s); logged per episode
+            "time": self.sim.time,            # back-compat alias
             "delivered": self.sim.delivered_total,
             "expired": self.sim.expired_total,
             "wrong": self.sim.wrong_total,
             "no_slot": self.sim.no_slot_total,
             "streak": self.sim.streak,
+            "best_streak": self.sim.best_streak,
         }
 
     # -- gym API -----------------------------------------------------------
     def reset(self, *, seed=None, options=None):
         if seed is None:
-            seed = self._seed
+            # Training: draw a fresh seed from the per-env meta-RNG (seeded once at
+            # construction from this env's rank) so vec envs + auto-resets diverge.
+            # The meta-RNG is untouched by explicit (eval) seeds, so two envs with
+            # different rank seeds never replay the same episode stream.
+            seed = self._meta_rng.randrange(2**31 - 1) if self.randomize_on_reset else self._seed
         self._seed = seed
         self.sim.reset(seed)
-        self._decidable_queue = self._frame_decidable()
-        # Advance to the first decision point if (somehow) none are ready.
+        self._decide_ptr = 0
+        # At t=0 all chefs are idle; advance to the first decision point regardless.
         ticks = 0
         max_ticks = int(self.time_cap / self.dt) + 10
-        while not self._decidable_queue and not self.sim.game_over and self.sim.time < self.time_cap:
+        idle = self._frame_decidable()
+        while not idle and not self.sim.game_over and self.sim.time < self.time_cap and ticks <= max_ticks:
             self.sim.tick(self.dt)
-            self._decidable_queue = self._frame_decidable()
+            idle = self._frame_decidable()
             ticks += 1
-            if ticks > max_ticks:
-                break
-        self.decision_chef = self._decidable_queue.pop(0) if self._decidable_queue else 0
+        self.decision_chef = idle[0] if idle else 0
         return self._obs(), self._info()
 
     def step(self, action: int):
@@ -870,37 +994,29 @@ class ChefOverflowEnv(_EnvBase):
         expired_b = self.sim.expired_total
         wrong_b = self.sim.wrong_total
         no_slot_b = self.sim.no_slot_total
+        phi_before = self._progress_potential()
 
         # 1) apply the macro to the current decision chef
         self._apply_macro(self.decision_chef, action)
 
-        # 2) advance to the next decision point
+        # 2) advance ≥ min_dwell of sim time to the next decision point
         max_ticks = int(self.time_cap / self.dt) + 10
-        ticks = 0
-        next_chef = None
-        while True:
-            # remaining offers in the current frame (zero time advance)
-            while self._decidable_queue:
-                cand = self._decidable_queue.pop(0)
-                if self._is_decidable(cand):
-                    next_chef = cand
-                    break
-            if next_chef is not None:
-                break
-            if self.sim.game_over or self.sim.time >= self.time_cap or ticks > max_ticks:
-                break
-            self.sim.tick(self.dt)
-            ticks += 1
-            self._decidable_queue = self._frame_decidable()
+        next_chef, ticks = self._advance_to_decision(max_ticks)
 
-        # 3) reward (spec §5.4)
+        # 3) reward (spec §5.4) + optional potential-based assembly shaping
         score_delta = self.sim.score - score_before
         expired_delta = (self.sim.expired_total - expired_b) + (self.sim.no_slot_total - no_slot_b)
         wrong_delta = self.sim.wrong_total - wrong_b
+        shaping = 0.0
+        if self.shaping_coef != 0.0:
+            # Ratchet: reward only NET-NEW demanded components (never claw back on
+            # expiry/delivery) so the breadcrumb survives to drive exploration.
+            shaping = self.shaping_coef * max(0.0, self._progress_potential() - phi_before)
         reward = (score_delta
                   - self.p_expiry * expired_delta
                   - self.p_wrong * wrong_delta
-                  - self.c_time)
+                  - self.c_time
+                  + shaping)
         reward *= self.reward_scale
 
         terminated = bool(self.sim.game_over)
@@ -912,6 +1028,7 @@ class ChefOverflowEnv(_EnvBase):
         info = self._info()
         info["score_delta"] = score_delta
         info["ticks_advanced"] = ticks
+        info["shaping"] = shaping
         return obs, float(reward), terminated, truncated, info
 
 
