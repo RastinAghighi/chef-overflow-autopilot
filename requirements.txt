@@ -9,3 +9,7 @@ torch>=2.1
 stable-baselines3>=2.5
 sb3-contrib>=2.5
 tensorboard>=2.14
+
+# Renderer (render/play.py) — view-only pygame tool to watch agents play the sim.
+# Install with the launcher on Windows:  py -m pip install pygame
+pygame>=2.5
