@@ -231,6 +231,105 @@ def _holding(sim, chef_id):
     return sim.chefs[chef_id]["holding"]
 
 
+def _interact_direct(sim, chef_id, stype, station):
+    """Exercise the literal interactWithStation branch without introducing
+    unrelated multi-chef path-blocking into small mechanic tests."""
+    sim._interact(sim.chefs[chef_id], {"type": stype, "station": station})
+
+
+# ===========================================================================
+# 4. Counter mechanics: staging, handoff, persistence and merge edges
+# ===========================================================================
+def test_counter_deposit_pickup_persistence_and_handoff():
+    sim = KitchenSim(seed=0)
+    sim.reset(seed=0)
+
+    item = {"ingredient": "tomato", "state": "raw"}
+
+    _interact_direct(sim, 0, "ingredientBin", sim.ingredient_bins[0])
+    assert _holding(sim, 0) == item
+
+    _interact_direct(sim, 0, "counter", sim.counters[0])
+    assert _holding(sim, 0) is None
+    assert sim.counters[0]["items"] == [item]
+
+    state_counter = sim.get_state()["stations"]["counters"][0]
+    assert state_counter["id"] == "counter_0"
+    assert state_counter["items"] == [item]
+
+    sim.advance(2.0, dt=DT)
+    assert sim.counters[0]["items"] == [item]
+
+    _interact_direct(sim, 0, "counter", sim.counters[0])
+    assert _holding(sim, 0) == item
+    assert sim.counters[0]["items"] == []
+
+    _interact_direct(sim, 0, "counter", sim.counters[0])
+    assert _holding(sim, 0) is None
+    assert sim.counters[0]["items"] == [item]
+
+    _interact_direct(sim, 1, "counter", sim.counters[0])
+    assert _holding(sim, 1) == item
+    assert sim.counters[0]["items"] == []
+
+
+def test_counter_occupied_component_noop():
+    sim = KitchenSim(seed=0)
+    sim.reset(seed=0)
+
+    tomato = {"ingredient": "tomato", "state": "raw"}
+    lettuce = {"ingredient": "lettuce", "state": "raw"}
+
+    _interact_direct(sim, 0, "ingredientBin", sim.ingredient_bins[0])
+    _interact_direct(sim, 0, "counter", sim.counters[1])
+    assert sim.counters[1]["items"] == [tomato]
+
+    _interact_direct(sim, 1, "ingredientBin", sim.ingredient_bins[1])
+    _interact_direct(sim, 1, "counter", sim.counters[1])
+    assert _holding(sim, 1) == lettuce
+    assert sim.counters[1]["items"] == [tomato]
+
+    _interact_direct(sim, 2, "counter", sim.counters[1])
+    assert _holding(sim, 2) == tomato
+    assert sim.counters[1]["items"] == []
+
+
+def test_counter_plate_component_merge_edges():
+    sim = KitchenSim(seed=0)
+    sim.reset(seed=0)
+
+    tomato = {"ingredient": "tomato", "state": "raw"}
+    lettuce = {"ingredient": "lettuce", "state": "raw"}
+    onion = {"ingredient": "onion", "state": "raw"}
+
+    _interact_direct(sim, 0, "ingredientBin", sim.ingredient_bins[0])
+    _interact_direct(sim, 0, "platingArea", sim.plating_areas[0])
+    _interact_direct(sim, 0, "platingArea", sim.plating_areas[0])
+    plate = _holding(sim, 0)
+    assert plate == {"type": "plate", "items": [tomato]}
+
+    _interact_direct(sim, 0, "counter", sim.counters[2])
+    assert _holding(sim, 0) is None
+    assert sim.counters[2]["items"] == [{"type": "plate", "items": [tomato]}]
+
+    _interact_direct(sim, 1, "ingredientBin", sim.ingredient_bins[1])
+    _interact_direct(sim, 1, "counter", sim.counters[2])
+    assert _holding(sim, 1) is None
+    assert sim.counters[2]["items"] == [{"type": "plate", "items": [tomato, lettuce]}]
+
+    _interact_direct(sim, 2, "counter", sim.counters[2])
+    assert _holding(sim, 2) == {"type": "plate", "items": [tomato, lettuce]}
+    assert sim.counters[2]["items"] == []
+
+    _interact_direct(sim, 3, "ingredientBin", sim.ingredient_bins[2])
+    _interact_direct(sim, 3, "counter", sim.counters[2])
+    assert sim.counters[2]["items"] == [onion]
+
+    _interact_direct(sim, 2, "counter", sim.counters[2])
+    assert _holding(sim, 2) == {"type": "plate", "items": [tomato, lettuce, onion]}
+    assert sim.counters[2]["items"] == []
+
+
 # ===========================================================================
 # 4a. Full Steak pipeline: fetch meat -> cook -> plate -> deliver
 # ===========================================================================

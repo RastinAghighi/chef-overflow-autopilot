@@ -48,6 +48,19 @@ function stepUntilHolding(sim, chefId, cap = 800) {
 function interact(sim, chefId, stationId) {
   sim.step([{ type: 'interact', chefId, stationId }]);
 }
+function holding(sim, chefId) {
+  return sim.getState().chefs.find(c => c.id === chefId)?.holding || null;
+}
+function itemKey(item) {
+  if (!item) return 'null';
+  if (item.type === 'plate') {
+    return 'plate:' + (item.items || []).map(itemKey).join('|');
+  }
+  return `${item.ingredient}:${item.state}`;
+}
+function sameItem(a, b) {
+  return itemKey(a) === itemKey(b);
+}
 
 // Drive one order to delivery; return the captured scoring inputs + deltas.
 function driveSteak(seed) {
@@ -107,7 +120,68 @@ function driveSalad(seed) {
   return { dish: 'Salad', cap, actualDelta: post.score - scoreBefore };
 }
 
+function driveCounterHandoff(seed) {
+  const sim = createSim({ seed });
+  const tomato = { ingredient: 'tomato', state: 'raw' };
+  const lettuce = { ingredient: 'lettuce', state: 'raw' };
+  const onion = { ingredient: 'onion', state: 'raw' };
+
+  interact(sim, 0, 'bin_0');
+  const fetchedTomato = sameItem(holding(sim, 0), tomato);
+  interact(sim, 0, 'counter_0');
+  const deposited = holding(sim, 0) === null;
+
+  for (let i = 0; i < 20; i++) sim.step([]);
+  interact(sim, 0, 'counter_0');
+  const sameChefPickup = sameItem(holding(sim, 0), tomato);
+  interact(sim, 0, 'counter_0');
+  interact(sim, 1, 'counter_0');
+  const differentChefPickup = sameItem(holding(sim, 1), tomato);
+
+  interact(sim, 1, 'counter_0');
+  interact(sim, 2, 'bin_1');
+  interact(sim, 2, 'counter_0');
+  const occupiedNoopLeavesHeld = sameItem(holding(sim, 2), lettuce);
+  interact(sim, 3, 'counter_0');
+  const occupiedNoopPreservedTop = sameItem(holding(sim, 3), tomato);
+
+  interact(sim, 3, 'plating_0');
+  interact(sim, 3, 'plating_0');
+  const plateFromCounterTop = holding(sim, 3);
+  interact(sim, 3, 'counter_0');
+  interact(sim, 2, 'counter_0');
+  const componentIntoCounterPlate = holding(sim, 2) === null;
+  interact(sim, 4, 'counter_0');
+  const mergedPlate = holding(sim, 4);
+  const plateMergeOk = itemKey(mergedPlate) === itemKey({ type: 'plate', items: [tomato, lettuce] });
+
+  interact(sim, 0, 'bin_2');
+  interact(sim, 0, 'counter_0');
+  interact(sim, 4, 'counter_0');
+  const heldPlateMerge = itemKey(holding(sim, 4)) === itemKey({ type: 'plate', items: [tomato, lettuce, onion] });
+  interact(sim, 0, 'counter_0');
+  const counterWasPopped = holding(sim, 0) === null;
+
+  return {
+    kind: 'counter_handoff',
+    checks: {
+      fetchedTomato,
+      deposited,
+      sameChefPickup,
+      differentChefPickup,
+      occupiedNoopLeavesHeld,
+      occupiedNoopPreservedTop,
+      componentIntoCounterPlate,
+      plateMergeOk,
+      heldPlateMerge,
+      counterWasPopped,
+      plateWasLiftable: plateFromCounterTop?.type === 'plate',
+    },
+  };
+}
+
 const results = [];
+results.push(driveCounterHandoff(777));
 for (let seed = 1; seed <= 12; seed++) {
   results.push(driveSteak(seed));
   results.push(driveSalad(seed + 1000));

@@ -24,6 +24,7 @@ def main():
     rows = json.loads(raw)
 
     checked = 0
+    counter_checked = 0
     skipped = 0
     failed = []
     for r in rows:
@@ -32,6 +33,13 @@ def main():
             continue
         if "skip" in r:
             skipped += 1
+            continue
+        if r.get("kind") == "counter_handoff":
+            checks = r.get("checks") or {}
+            bad = [name for name, ok in checks.items() if not ok]
+            counter_checked += 1
+            if bad:
+                failed.append(("counter_handoff", "failed checks: " + ", ".join(bad)))
             continue
         cap = r["cap"]
         expected = C.delivery_score(cap["difficulty"], cap["timeLeft"], cap["streak"], bool(cap["vip"]))
@@ -44,12 +52,14 @@ def main():
     print("END-TO-END CROSS-CHECK  (real core.js pipeline  vs  constants.delivery_score)")
     print("=" * 70)
     print(f"  deliveries validated: {checked}    skipped (expired/no-spawn): {skipped}")
+    print(f"  counter pipelines validated: {counter_checked}")
     if failed:
         print(f"  FAILURES: {len(failed)}")
         for dish, msg in failed:
             print(f"    [{dish}] {msg}")
         sys.exit(1)
     print("  Every core.js delivery score matched constants.delivery_score EXACTLY")
+    print("  Counter handoff/merge pipeline matched the expected core.js mechanics")
 
 
 if __name__ == "__main__":

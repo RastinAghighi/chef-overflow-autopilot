@@ -96,10 +96,11 @@ def _cook_demand_visible(state: dict[str, Any]) -> bool:
 
 
 class TraceRecorder:
-    def __init__(self, seed: int, source: str, trace_id: str):
+    def __init__(self, seed: int, source: str, trace_id: str, agent_version: str = "planner.py+milestone1"):
         self.seed = seed
         self.source = source
         self.trace_id = trace_id
+        self.agent_version = agent_version
         self.events: list[dict[str, Any]] = []
         self.seq = 0
 
@@ -120,7 +121,7 @@ class TraceRecorder:
                 "started_at_iso": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
                 "source": self.source,
                 "game_url": None,
-                "agent_version": "planner.py+milestone1",
+                "agent_version": self.agent_version,
                 "game_api_version": "sim.env",
                 "seed_known": True,
                 "tick_hz": 60,
@@ -222,10 +223,11 @@ class IntervalMetrics:
 
 
 class InstrumentedApi:
-    def __init__(self, sim: KitchenSim, recorder: TraceRecorder, reservations: ReservationManager):
+    def __init__(self, sim: KitchenSim, recorder: TraceRecorder, reservations: ReservationManager, reason: str = "planner"):
         self.sim = sim
         self.recorder = recorder
         self.reservations = reservations
+        self.reason = reason
         self.active: dict[int, dict[str, Any]] = {}
 
     def _release_active(self, chef_id: int, reason: str) -> None:
@@ -260,7 +262,7 @@ class InstrumentedApi:
             {
                 "chef_id": chef_id,
                 "target_id": target_id,
-                "reason": "planner",
+                "reason": self.reason,
                 "executor_state_before": "IDLE" if previous is None else "MOVING",
                 "chef_pos": [chef["x"], chef["y"]],
                 "holding": _clone_item(chef.get("holding")),
@@ -328,7 +330,7 @@ class InstrumentedApi:
     def boost(self, chef_id: int):
         tick = _state_tick(self.sim)
         ms = _state_ms(self.sim)
-        self.recorder.record("boost_attempt", tick, ms, {"chef_id": chef_id, "reason": "planner"})
+        self.recorder.record("boost_attempt", tick, ms, {"chef_id": chef_id, "reason": self.reason})
         result = self.sim.boost(chef_id)
         self.recorder.record(
             "boost_result",
