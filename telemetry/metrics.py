@@ -450,6 +450,8 @@ def merge_metric_dicts(metrics_list: list[dict[str, Any]]) -> dict[str, Any]:
     stand_acc = Counter()
     executor_acc = Counter()
     reservation_acc = Counter()
+    planner_acc = Counter()
+    planner_features: dict[str, bool] = {}
 
     for metrics in metrics_list:
         summary = metrics.get("summary") or {}
@@ -483,6 +485,13 @@ def merge_metric_dicts(metrics_list: list[dict[str, Any]]) -> dict[str, Any]:
         for k, v in (metrics.get("reservations") or {}).items():
             if isinstance(v, (int, float)):
                 reservation_acc[k] += float(v)
+        planner = metrics.get("planner") or {}
+        for k, v in planner.items():
+            if k == "features" and isinstance(v, dict):
+                for fk, enabled in v.items():
+                    planner_features[fk] = bool(enabled)
+            elif isinstance(v, (int, float)):
+                planner_acc[k] += float(v)
         for minute, vals in ((metrics.get("throughput") or {}).get("by_minute") or {}).items():
             for k, v in vals.items():
                 by_minute[int(minute)][k] += float(v)
@@ -528,6 +537,10 @@ def merge_metric_dicts(metrics_list: list[dict[str, Any]]) -> dict[str, Any]:
     out["stand_pressure"] = {k: avg(stand_acc, k) for k in stand_acc}
     out["executor"] = {k: avg(executor_acc, k) for k in executor_acc}
     out["reservations"] = {k: avg(reservation_acc, k) for k in reservation_acc}
+    if planner_acc or planner_features:
+        out["planner"] = {"features": planner_features} | {
+            k: int(v) for k, v in planner_acc.items()
+        }
     out["pathing"]["blocked_locations"] = dict(blocked.most_common(25))
     out["waste"]["component_count"] = int(waste_counts["component_count"])
     out["waste"]["plate_count"] = int(waste_counts["plate_count"])

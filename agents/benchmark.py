@@ -37,13 +37,14 @@ class SimApi:
         return self.sim.boost(chef_id)
 
 
-def run_episode(seed, time_cap=C.DEFAULT_TIME_CAP, dt=1.0 / 60.0, decide_every=3):
+def run_episode(seed, time_cap=C.DEFAULT_TIME_CAP, dt=1.0 / 60.0, decide_every=3,
+                features=None):
     """Run one full episode under the planner. ``decide_every`` throttles planner
     calls to every N ticks (decisions only matter when a chef goes idle, so this is
     behaviourally ~identical to every-tick while running far faster).  At 60 fps,
     decide_every=3 ≈ 20 Hz."""
     sim = KitchenSim(seed)
-    planner = Planner()
+    planner = Planner(features=features or set())
     api = SimApi(sim)
 
     max_ticks = int(round(time_cap / dt))
@@ -79,11 +80,14 @@ def _fmt(label, xs, prec=1):
     return f"  {label:<14} mean {mean:>10.{prec}f}   median {med:>10.{prec}f}   min {min(xs):>9.{prec}f}   max {max(xs):>9.{prec}f}"
 
 
-def benchmark(seeds, time_cap=C.DEFAULT_TIME_CAP, decide_every=3, verbose=True):
+def benchmark(seeds, time_cap=C.DEFAULT_TIME_CAP, decide_every=3, verbose=True,
+              features=None):
+    features = set(features or ())
     results = []
     t0 = _wall.perf_counter()
     for s in seeds:
-        r = run_episode(s, time_cap=time_cap, decide_every=decide_every)
+        r = run_episode(s, time_cap=time_cap, decide_every=decide_every,
+                        features=features)
         results.append(r)
         if verbose:
             print(f"seed {s:>3}: score {r['score']:>10.1f}  deliv {r['delivered']:>3}  "
@@ -93,8 +97,10 @@ def benchmark(seeds, time_cap=C.DEFAULT_TIME_CAP, decide_every=3, verbose=True):
     elapsed = _wall.perf_counter() - t0
 
     print("\n" + "=" * 78)
+    feature_label = ",".join(sorted(features))
+    suffix = f", features={feature_label}" if feature_label else ""
     print(f"PLANNER BENCHMARK — {len(seeds)} seeds, cap {time_cap:.0f}s, "
-          f"decide@{60 // decide_every}Hz, {elapsed:.1f}s wall")
+          f"decide@{60 // decide_every}Hz, {elapsed:.1f}s wall{suffix}")
     print("=" * 78)
     print(_fmt("score", [r["score"] for r in results]))
     print(_fmt("deliveries", [r["delivered"] for r in results], prec=1))
@@ -116,11 +122,46 @@ def main():
     ap.add_argument("--cap", type=float, default=C.DEFAULT_TIME_CAP, help="sim-time cap (s)")
     ap.add_argument("--decide-hz", type=int, default=20, help="planner decision rate (Hz)")
     ap.add_argument("--seed-start", type=int, default=0)
+    ap.add_argument("--f1-build-ahead", action="store_true", help="enable upcoming-order build-ahead")
+    ap.add_argument("--f2-stand-pressure", action="store_true", help="enable stand-pressure delivery priority")
+    ap.add_argument("--f3-parallel-assembly", action="store_true", help="enable one-helper parallel assembly")
     args = ap.parse_args()
 
     decide_every = max(1, round(60 / max(1, args.decide_hz)))
+    features = set()
+    if args.f1_build_ahead:
+        features.add("f1")
+    if args.f2_stand_pressure:
+        features.add("f2")
+    if args.f3_parallel_assembly:
+        features.add("f3")
     seeds = list(range(args.seed_start, args.seed_start + args.seeds))
-    benchmark(seeds, time_cap=args.cap, decide_every=decide_every)
+    results = []
+    t0 = _wall.perf_counter()
+    for s in seeds:
+        r = run_episode(s, time_cap=args.cap, decide_every=decide_every, features=features)
+        results.append(r)
+        print(f"seed {s:>3}: score {r['score']:>10.1f}  deliv {r['delivered']:>3}  "
+              f"exp {r['expired']}  wrong {r['wrong']}  noslot {r['no_slot']}  "
+              f"streak {r['max_streak']:>3}  t {r['survival']:>7.1f}  "
+              f"{'OVER' if r['game_over'] else 'cap'}")
+    elapsed = _wall.perf_counter() - t0
+    print("\n" + "=" * 78)
+    print(f"PLANNER BENCHMARK — {len(seeds)} seeds, cap {args.cap:.0f}s, "
+          f"decide@{60 // decide_every}Hz, {elapsed:.1f}s wall, "
+          f"features={','.join(sorted(features)) or 'baseline'}")
+    print("=" * 78)
+    print(_fmt("score", [r["score"] for r in results]))
+    print(_fmt("deliveries", [r["delivered"] for r in results], prec=1))
+    print(_fmt("fails(total)", [r["fails"] for r in results], prec=1))
+    print(_fmt("  expiry", [r["expired"] for r in results], prec=1))
+    print(_fmt("  wrong", [r["wrong"] for r in results], prec=1))
+    print(_fmt("  no-slot", [r["no_slot"] for r in results], prec=1))
+    print(_fmt("max streak", [r["max_streak"] for r in results], prec=1))
+    print(_fmt("survival(s)", [r["survival"] for r in results], prec=1))
+    n_over = sum(1 for r in results if r["game_over"])
+    print(f"\n  reached 3-strike game-over: {n_over}/{len(seeds)}   "
+          f"survived to cap: {len(seeds) - n_over}/{len(seeds)}")
 
 
 if __name__ == "__main__":

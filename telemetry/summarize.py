@@ -25,6 +25,7 @@ def format_report(metrics: dict) -> str:
     waste = metrics.get("waste") or {}
     executor = metrics.get("executor") or {}
     reservations = metrics.get("reservations") or {}
+    planner = metrics.get("planner") or {}
 
     lines = []
     if "runs" in metrics:
@@ -81,6 +82,15 @@ def format_report(metrics: dict) -> str:
         f"retargets {executor.get('retargets', 0):.1f} | "
         f"reservation conflicts {reservations.get('conflicts', 0):.1f}"
     )
+    if planner:
+        features = planner.get("features") or {}
+        enabled = ",".join(k for k, v in sorted(features.items()) if v) or "baseline"
+        lines.append(
+            "Planner features: "
+            f"{enabled} | build-ahead triggers {planner.get('buildahead_triggers', 0)} | "
+            f"build-ahead completions {planner.get('buildahead_completions', 0)} | "
+            f"helper assignments {planner.get('helper_assignments', 0)}"
+        )
     lines.append(
         f"Waste: components {waste.get('component_count', 0)} | plates {waste.get('plate_count', 0)}"
     )

@@ -15,6 +15,7 @@ import math
 import statistics
 import sys
 from collections import Counter, defaultdict
+from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -105,7 +106,7 @@ class TraceRecorder:
         self.seq = 0
 
     def record(self, event_type: str, tick: int, ms: float, data: dict[str, Any] | None = None) -> None:
-        self.events.append(make_event(event_type, tick, ms, self.seq, data or {}))
+        self.events.append(make_event(event_type, tick, ms, self.seq, deepcopy(data or {})))
         self.seq += 1
 
     def start(self, sim: KitchenSim) -> None:
@@ -406,11 +407,18 @@ def _major_failure_reason(sim: KitchenSim) -> str:
     return max(counts, key=counts.get) if any(counts.values()) else "unknown"
 
 
-def run_instrumented_episode(seed: int, time_cap: float, decide_every: int, out_dir: Path | None = None) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+def run_instrumented_episode(
+    seed: int,
+    time_cap: float,
+    decide_every: int,
+    out_dir: Path | None = None,
+    features: set[str] | None = None,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     sim = KitchenSim(seed)
-    planner = Planner()
+    planner = Planner(features=features or set())
     trace_id = f"sim-planner-seed-{seed}"
-    recorder = TraceRecorder(seed, "sim", trace_id)
+    feature_label = ",".join(sorted(features or [])) or "baseline"
+    recorder = TraceRecorder(seed, "sim", trace_id, agent_version=f"planner.py+{feature_label}")
     reservations = ReservationManager()
     api = InstrumentedApi(sim, recorder, reservations)
     interval = IntervalMetrics()
@@ -527,6 +535,7 @@ def run_instrumented_episode(seed: int, time_cap: float, decide_every: int, out_
 
     trace = Trace(path=None, events=recorder.events)
     metrics = compute_metrics(trace)
+    metrics["planner"] = planner.get_metrics()
     if out_dir is not None:
         run_dir = out_dir / f"seed_{seed:03d}"
         run_dir.mkdir(parents=True, exist_ok=True)
@@ -564,17 +573,28 @@ def main() -> None:
     ap.add_argument("--cap", type=float, default=C.DEFAULT_TIME_CAP)
     ap.add_argument("--decide-hz", type=int, default=20)
     ap.add_argument("--out-dir", default=None)
+    ap.add_argument("--f1-build-ahead", action="store_true", help="enable upcoming-order build-ahead")
+    ap.add_argument("--f2-stand-pressure", action="store_true", help="enable stand-pressure delivery priority")
+    ap.add_argument("--f3-parallel-assembly", action="store_true", help="enable one-helper parallel assembly")
     args = ap.parse_args()
 
     decide_every = max(1, round(60 / max(1, args.decide_hz)))
+    features = set()
+    if args.f1_build_ahead:
+        features.add("f1")
+    if args.f2_stand_pressure:
+        features.add("f2")
+    if args.f3_parallel_assembly:
+        features.add("f3")
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    out_dir = Path(args.out_dir) if args.out_dir else ROOT / "traces" / f"{stamp}_sim_planner_m1"
+    feature_label = "_".join(sorted(features)) if features else "baseline"
+    out_dir = Path(args.out_dir) if args.out_dir else ROOT / "traces" / f"{stamp}_sim_planner_{feature_label}"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     seeds = list(range(args.seed_start, args.seed_start + args.seeds))
     per_seed = []
     for seed in seeds:
-        metrics, _events = run_instrumented_episode(seed, args.cap, decide_every, out_dir)
+        metrics, _events = run_instrumented_episode(seed, args.cap, decide_every, out_dir, features)
         per_seed.append(metrics)
         s = metrics["summary"]
         print(
