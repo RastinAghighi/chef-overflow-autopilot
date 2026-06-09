@@ -76,6 +76,13 @@ def _item_matches_recipe(items: list[dict[str, Any]], dish: str) -> bool:
     return not (have - req) and not (req - have)
 
 
+def _matching_dish_for_items(items: list[dict[str, Any]]) -> str | None:
+    for dish in C.DISH_NAMES:
+        if _item_matches_recipe(items, dish):
+            return dish
+    return None
+
+
 def _items_fit_recipe(items: list[dict[str, Any]], dish: str) -> bool:
     have = _counter(items)
     req = _recipe_counter(dish)
@@ -166,6 +173,7 @@ class RollingScheduler:
         self.inferred_customers: dict[str, int] = {}
         self.failed_until: dict[tuple[int, str], int] = {}
         self.corridor_windows: list[tuple[int, int, int, str]] = []
+        self.chef_area: dict[int, str] = {}
         self.roles = {
             0: "cook",
             1: "chopper",
@@ -195,6 +203,7 @@ class RollingScheduler:
         self._purge_transient_state(state, tick)
         self._reconcile_roles(state)
         self._reconcile_area_plans(state, layout, tick)
+        self._assign_plan_owners(state, layout)
         self._recover_blocked_chefs(state, api, layout, tick)
 
         chefs = state.get("chefs", []) or []
@@ -208,6 +217,9 @@ class RollingScheduler:
         for chef in sorted(idle, key=lambda c: int(c["id"])):
             cid = int(chef["id"])
             candidates = self._candidate_tasks(chef, state, layout, pressure, busy_targets, tick)
+            useful = [t for t in candidates if t.kind not in {"WAIT", "PARK"} and t.value > 0]
+            if useful:
+                candidates = useful + [t for t in candidates if t.kind == "WAIT"]
             ranked: list[tuple[float, Task]] = []
             for task in candidates:
                 if self.failed_until.get((cid, task.target_id), -1) > tick:
@@ -314,13 +326,18 @@ class RollingScheduler:
     @staticmethod
     def _zone(pos: tuple[int, int]) -> str:
         x, y = pos
-        if (x, y) in {(6, 6), (6, 7), (7, 6), (7, 7), (13, 6), (13, 7)}:
+        if (x, y) in {(13, 6), (13, 7)}:
             return "corridor_gap"
         if x <= 8:
             return "kitchen_left"
         if x <= 12:
             return "assembly_mid"
         return "service_right"
+
+    @staticmethod
+    def _near_hotspot(pos: tuple[int, int]) -> bool:
+        x, y = pos
+        return 5 <= x <= 8 and 5 <= y <= 8
 
     def _update_customer_inference(self, state: dict[str, Any], tick: int) -> None:
         dt_ticks = max(0, tick - int(round(self.prev_time * 60.0)))
@@ -491,6 +508,64 @@ class RollingScheduler:
             elif area_id and area_id not in self.area_plans:
                 self.chef_commitment.pop(cid, None)
 
+        for cid, area_id in list(self.chef_area.items()):
+            if area_id not in self.area_plans:
+                self.chef_area.pop(cid, None)
+
+    def _assign_plan_owners(self, state: dict[str, Any], layout: Layout) -> None:
+        chefs = {int(c["id"]): c for c in state.get("chefs", []) or []}
+        for area_id, plan in list(self.area_plans.items()):
+            owner = plan.get("owner_id")
+            if owner is not None:
+                owner = int(owner)
+                if owner not in chefs or self.chef_area.get(owner) != area_id:
+                    plan.pop("owner_id", None)
+                elif plan.get("source") == "orphan":
+                    self.chef_area.pop(owner, None)
+                    plan.pop("owner_id", None)
+
+        used = {
+            int(plan["owner_id"])
+            for plan in self.area_plans.values()
+            if plan.get("owner_id") is not None
+        }
+        for cid in list(self.chef_area):
+            if cid not in used:
+                self.chef_area.pop(cid, None)
+
+        available = [
+            c for c in chefs.values()
+            if int(c["id"]) not in used
+            and int(c["id"]) not in self.chef_area
+            and not _is_plate(c.get("holding"))
+        ]
+        available.sort(key=lambda c: (0 if self._is_idle(c) else 1, self.roles.get(int(c["id"]), "flex") == "runner", int(c["id"])))
+
+        unowned = [
+            (area_id, plan)
+            for area_id, plan in self.area_plans.items()
+            if plan.get("owner_id") is None and plan.get("source") in {"active", "upcoming"}
+        ]
+        unowned.sort(key=lambda kv: (0 if kv[1].get("source") == "active" else 1, self._plan_deadline(kv[1]), kv[0]))
+        for area_id, plan in unowned:
+            if not available:
+                break
+            area = layout.station_by_id.get(area_id)
+            if not area:
+                continue
+            chef = min(
+                available,
+                key=lambda c: (
+                    _manhattan(tuple(c["pos"]), _pos(area)),
+                    0 if self.roles.get(int(c["id"])) != "runner" else 1,
+                    int(c["id"]),
+                ),
+            )
+            available.remove(chef)
+            cid = int(chef["id"])
+            plan["owner_id"] = cid
+            self.chef_area[cid] = area_id
+
     @staticmethod
     def _choose_area_for_order(order: dict[str, Any], areas: list[dict[str, Any]], layout: Layout) -> dict[str, Any]:
         stand = next((s for s in layout.stands if s["id"] == order.get("standId")), None)
@@ -558,6 +633,29 @@ class RollingScheduler:
 
         if _is_plate(holding):
             tasks.extend(self._deliver_tasks(holding, layout, state, pressure))
+            if not tasks:
+                dish = _matching_dish_for_items(holding.get("items", []) or [])
+                upcoming_dishes = {u.get("dish") for u in state.get("upcomingOrders", []) or []}
+                if dish in upcoming_dishes:
+                    empty = [
+                        area for area in layout.areas
+                        if area["id"] not in busy_targets and not (area.get("items") or [])
+                    ]
+                    if empty:
+                        area = min(empty, key=lambda a: (_pos(a)[0] < 10, _manhattan(tuple(chef["pos"]), _pos(a)), a["id"]))
+                        tasks.append(
+                            self._task(
+                                "DEPOSIT_PLATING",
+                                area["id"],
+                                layout,
+                                value=850,
+                                dish=dish,
+                                area_id=area["id"],
+                                source="upcoming",
+                                hard=(f"area:{area['id']}",),
+                                note="return build-ahead plate",
+                            )
+                        )
             tasks.append(self._task("TRASH", layout.trash_id, layout, value=25, note="unmatched plate"))
             return tasks
 
@@ -567,8 +665,8 @@ class RollingScheduler:
                 tasks.append(self._task("TRASH", layout.trash_id, layout, value=10, note="unusable component"))
             return tasks
 
-        tasks.extend(self._lift_plate_tasks(layout, state, pressure, busy_targets))
-        tasks.extend(self._unstage_counter_tasks(layout, state, pressure, busy_targets))
+        tasks.extend(self._lift_plate_tasks(chef, layout, state, pressure, busy_targets))
+        tasks.extend(self._unstage_counter_tasks(cid, layout, state, pressure, busy_targets))
         tasks.extend(self._fetch_tasks(cid, layout, state, pressure, busy_targets))
         park = self._park_task(chef, layout, busy_targets)
         if park:
@@ -657,6 +755,7 @@ class RollingScheduler:
 
     def _lift_plate_tasks(
         self,
+        chef: dict[str, Any],
         layout: Layout,
         state: dict[str, Any],
         pressure: dict[str, Any],
@@ -664,6 +763,9 @@ class RollingScheduler:
     ) -> list[Task]:
         tasks = []
         orders = list(state.get("orders", []) or [])
+        cid = int(chef["id"])
+        chef_pos = tuple(chef["pos"])
+        chefs_by_id = {int(c["id"]): c for c in state.get("chefs", []) or []}
         for area in layout.areas:
             if area["id"] in busy_targets:
                 continue
@@ -722,7 +824,7 @@ class RollingScheduler:
                 tasks.append(self._deposit_task(plan, area, key, pressure, layout))
                 return tasks
 
-        for plan, area, missing in self._plans_with_missing(layout, ignore_chef=cid):
+        for plan, area, missing in self._plans_with_missing(layout, ignore_chef=cid, chef_id=cid):
             if missing[key] <= 0:
                 continue
             tasks.append(self._deposit_task(plan, area, key, pressure, layout))
@@ -730,7 +832,7 @@ class RollingScheduler:
         if key[1] == "raw":
             final = _processed_form(key[0])
             if final is not None:
-                for plan, area, missing in self._plans_with_missing(layout, ignore_chef=cid):
+                for plan, area, missing in self._plans_with_missing(layout, ignore_chef=cid, chef_id=cid):
                     if missing[final] <= 0:
                         continue
                     tasks.extend(self._process_tasks_for_component(key[0], final, area["id"], layout, busy_targets))
@@ -819,8 +921,13 @@ class RollingScheduler:
         pressure: dict[str, Any],
         busy_targets: set[str],
     ) -> Task | None:
+        # V1 trace attribution showed every completed counter handoff lost time
+        # versus producer-carry-through.  V2 therefore only allows counter staging
+        # from call sites that can prove a net distance win; none of the structural
+        # owner-flow paths use it.
         if pressure["occupied"] >= PRESSURE_RED_OCCUPIED:
             return None
+        return None
         candidates = [
             c for c in layout.counters
             if c["id"] in layout.handoff_counter_ids
@@ -842,6 +949,7 @@ class RollingScheduler:
 
     def _unstage_counter_tasks(
         self,
+        cid: int,
         layout: Layout,
         state: dict[str, Any],
         pressure: dict[str, Any],
@@ -857,7 +965,7 @@ class RollingScheduler:
             key = _component_key(items[-1])
             best_plan = None
             best_missing = None
-            for plan, area, missing in self._plans_with_missing(layout):
+            for plan, area, missing in self._plans_with_missing(layout, chef_id=cid):
                 if missing[key] > 0:
                     score = (0 if plan.get("source") == "active" else 1, self._plan_deadline(plan), area["id"])
                     if best_plan is None or score < best_plan[0]:
@@ -895,20 +1003,14 @@ class RollingScheduler:
         busy_targets: set[str],
     ) -> list[Task]:
         tasks = []
-        fetching_ingredients = {
-            c.get("raw_ingredient")
-            for chef_id, c in self.chef_commitment.items()
-            if chef_id != cid and c.get("raw_ingredient")
-        }
-        for plan, area, missing in self._plans_with_missing(layout):
+        assist_free_chef = cid not in self.chef_area
+        for plan, area, missing in self._plans_with_missing(layout, chef_id=cid, allow_assist=assist_free_chef):
             for final in sorted(missing, key=lambda x: (x[1] != "cooked", x[1] != "chopped", x[0])):
                 count_missing = missing[final]
                 if count_missing <= 0:
                     continue
                 ingredient, state_name = final
                 if ingredient not in layout.bins_by_ing:
-                    continue
-                if ingredient in fetching_ingredients and self._plan_deadline(plan) > IMMINENT_EXPIRY_SEC:
                     continue
                 bin_station = layout.bins_by_ing[ingredient]
                 if bin_station["id"] in busy_targets:
@@ -969,6 +1071,8 @@ class RollingScheduler:
         self,
         layout: Layout,
         ignore_chef: int | None = None,
+        chef_id: int | None = None,
+        allow_assist: bool = False,
     ) -> list[tuple[dict[str, Any], dict[str, Any], Counter]]:
         out = []
         for area_id, plan in sorted(self.area_plans.items(), key=lambda kv: (self._plan_deadline(kv[1]), kv[0])):
@@ -1031,6 +1135,11 @@ class RollingScheduler:
         travel = _manhattan(cpos, task.target_pos) * TICKS_PER_TILE
         role = self.roles.get(int(chef["id"]), "flex")
         role_penalty = self._role_penalty(role, task, pressure)
+        if task.area_id:
+            plan = self.area_plans.get(task.area_id)
+            owner = plan.get("owner_id") if plan else None
+            if owner is not None and int(owner) != int(chef["id"]):
+                role_penalty += 120
         corridor_penalty = self._corridor_penalty(cpos, task.target_pos, role, task, tick)
         deadline_risk = 0.0
         if task.deadline_sec < 999:
@@ -1077,22 +1186,22 @@ class RollingScheduler:
         tick: int,
     ) -> float:
         if not self._crosses_corridor(start, end):
-            return 0.0
+            return 45.0 if self._near_hotspot(start) or self._near_hotspot(end) else 0.0
         earliest_start = tick + max(1, _manhattan(start, end) * TICKS_PER_TILE // 2)
         duration = 30
         wait = 0
         for s, e, _cid, _direction in sorted(self.corridor_windows):
             if earliest_start + wait < e and earliest_start + wait + duration > s:
                 wait = e - earliest_start
-        penalty = wait
+        penalty = min(wait, 60)
         if role != "runner" and task.kind not in {"DELIVER", "LIFT_PLATE"}:
-            penalty += 180
+            penalty += 80
+        if self._near_hotspot(start) or self._near_hotspot(end):
+            penalty += 45
         return float(penalty)
 
     @staticmethod
     def _crosses_corridor(start: tuple[int, int], end: tuple[int, int]) -> bool:
-        if start[0] <= 8 < end[0] or end[0] <= 8 < start[0]:
-            return True
         if start[0] <= 12 < end[0] or end[0] <= 12 < start[0]:
             return True
         return False
@@ -1104,11 +1213,10 @@ class RollingScheduler:
 
         def rec(i: int, used: set[str], total: float, chosen: dict[int, Task]) -> None:
             nonlocal best_cost, best_choice
-            if total >= best_cost:
-                return
             if i >= len(chefs):
-                best_cost = total
-                best_choice = dict(chosen)
+                if total < best_cost:
+                    best_cost = total
+                    best_choice = dict(chosen)
                 return
             cid = chefs[i]
             rows = candidates_by_chef.get(cid) or []
