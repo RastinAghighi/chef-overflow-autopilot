@@ -1,0 +1,405 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Chef Overflow: API Reference</title>
+    <link rel="icon" type="image/svg+xml" href="assets/favicon.svg">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg:       #0D0820;
+            --navy:     #130A38;
+            --midnight: #1E1058;
+            --indigo:   #2C1C7A;
+            --purple:   #3D2A90;
+            --violet:   #6040B8;
+            --teal:     #44D9B8;
+            --teal-lt:  #7BE8D0;
+            --gold:     #E8B84B;
+            --amber:    #D4944C;
+            --text:     #EAE4F8;
+            --muted:    #9888C0;
+            --dim:      #5A4880;
+            --code-bg:  #0A0620;
+            --border:   rgba(68, 217, 184, 0.12);
+            --card-bg:  rgba(30, 16, 88, 0.55);
+            --card-radius: 12px;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        html { scroll-behavior: smooth; }
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: linear-gradient(165deg, var(--bg) 0%, var(--navy) 38%, var(--midnight) 100%);
+            color: var(--text);
+            line-height: 1.65;
+            min-height: 100vh;
+            padding: 40px 20px 80px;
+        }
+        .wrap { max-width: 820px; margin: 0 auto; }
+        a { color: var(--teal-lt); text-decoration: none; }
+        a:hover { text-decoration: underline; }
+
+        /* Header */
+        header { text-align: center; margin-bottom: 56px; }
+        .ht6-logo {
+            height: 120px;
+            width: auto;
+            display: block;
+            margin: 0 auto 12px;
+            filter: drop-shadow(0 0 12px rgba(68, 217, 184, 0.3))
+                    drop-shadow(0 4px 16px rgba(0, 0, 0, 0.5));
+        }
+        header h1 {
+            font-size: clamp(1.5rem, 4vw, 1.9rem);
+            font-weight: 800;
+            letter-spacing: 0.04em;
+            background: linear-gradient(180deg, #fff8f0 0%, var(--gold) 55%, var(--amber) 100%);
+            -webkit-background-clip: text;
+            background-clip: text;
+            color: transparent;
+            -webkit-text-fill-color: transparent;
+            filter: drop-shadow(0 0 18px rgba(232, 184, 75, 0.5));
+            margin-bottom: 10px;
+        }
+        .subtitle { color: var(--muted); font-size: 0.95rem; margin-bottom: 18px; }
+        .header-row {
+            display: flex; flex-wrap: wrap; align-items: center;
+            justify-content: center; gap: 10px;
+        }
+        .pill {
+            display: inline-block;
+            padding: 5px 14px;
+            border-radius: 20px;
+            font-size: 0.82rem;
+            font-weight: 600;
+            border: 1px solid var(--border);
+        }
+        .pill-teal {
+            background: rgba(68, 217, 184, 0.1);
+            border-color: rgba(68, 217, 184, 0.25);
+            color: var(--teal-lt);
+        }
+        .pill-mono {
+            background: rgba(96, 64, 184, 0.18);
+            border-color: rgba(96, 64, 184, 0.35);
+            color: var(--teal-lt);
+            font-family: ui-monospace, 'Cascadia Code', Consolas, monospace;
+            font-weight: 500;
+        }
+        .pill-teal:hover { background: rgba(68, 217, 184, 0.18); text-decoration: none; }
+
+        /* Sections share one rhythm */
+        section { margin-top: 40px; }
+        section:first-of-type { margin-top: 0; }
+        h2 {
+            font-size: 0.82rem;
+            font-weight: 700;
+            color: var(--teal-lt);
+            letter-spacing: 0.14em;
+            text-transform: uppercase;
+            margin: 0 0 14px;
+            padding-left: 4px;
+        }
+        h3 {
+            font-size: 0.95rem;
+            font-weight: 600;
+            color: var(--teal-lt);
+            font-family: ui-monospace, 'Cascadia Code', Consolas, monospace;
+            margin: 18px 0 6px;
+        }
+        h3:first-child { margin-top: 0; }
+        p, li { font-size: 0.92rem; margin-bottom: 8px; }
+        p:last-child, li:last-child { margin-bottom: 0; }
+        ul, ol { padding-left: 1.3rem; }
+        li { margin-bottom: 6px; }
+        li::marker { color: var(--violet); }
+        strong { color: var(--text); font-weight: 600; }
+
+        /* One card shell, used by every section body */
+        .card {
+            background: var(--card-bg);
+            border: 1px solid var(--border);
+            border-radius: var(--card-radius);
+            padding: 20px 24px;
+            backdrop-filter: blur(10px);
+        }
+        .card > *:last-child { margin-bottom: 0; }
+        .card.card-flush { padding: 0; overflow: hidden; }
+        .card + .card { margin-top: 14px; }
+
+        /* Inline code and kbd, uniform */
+        code, kbd, pre, .type-block {
+            font-family: ui-monospace, 'Cascadia Code', 'Fira Code', Consolas, monospace;
+        }
+        :not(pre) > code {
+            font-size: 0.82rem;
+            color: var(--teal-lt);
+            background: rgba(96, 64, 184, 0.15);
+            padding: 1px 6px;
+            border-radius: 4px;
+        }
+        kbd {
+            font-size: 0.8em;
+            background: rgba(96, 64, 184, 0.3);
+            border: 1px solid rgba(96, 64, 184, 0.5);
+            border-radius: 5px;
+            padding: 1px 7px;
+            color: var(--text);
+        }
+        .type-block {
+            background: var(--code-bg);
+            border: 1px solid rgba(96, 64, 184, 0.3);
+            border-radius: 10px;
+            padding: 16px 18px;
+            margin: 12px 0 4px;
+            font-size: 0.82rem;
+            white-space: pre;
+            overflow-x: auto;
+            color: #c8d8f0;
+            line-height: 1.5;
+        }
+
+        /* Tables share the same card chrome */
+        table {
+            width: 100%;
+            border-collapse: separate;
+            border-spacing: 0;
+            font-size: 0.87rem;
+            background: transparent;
+        }
+        th, td {
+            padding: 11px 16px;
+            text-align: left;
+            vertical-align: top;
+            border-bottom: 1px solid var(--border);
+        }
+        tr:last-child td { border-bottom: none; }
+        th {
+            background: rgba(61, 42, 144, 0.45);
+            color: var(--teal-lt);
+            font-weight: 600;
+            font-size: 0.76rem;
+            text-transform: uppercase;
+            letter-spacing: 0.1em;
+        }
+        tr:hover td { background: rgba(96, 64, 184, 0.08); }
+
+        /* API method block: same card, internal h3 + p */
+        .api-method { margin-bottom: 14px; }
+        .api-method:last-child { margin-bottom: 0; }
+
+        footer {
+            margin-top: 64px;
+            padding-top: 24px;
+            border-top: 1px solid var(--border);
+            color: var(--dim);
+            font-size: 0.85rem;
+            text-align: center;
+        }
+        footer a { color: var(--muted); }
+        footer p + p { margin-top: 6px; }
+    </style>
+</head>
+<body>
+<div class="wrap">
+    <header>
+        <img src="logo.png" alt="Hack the 6ix" class="ht6-logo">
+        <h1>Chef Overflow: API Reference</h1>
+        <p class="subtitle">Automate the kitchen. Top scores earn automatic admission to Hack the 6ix 2026.</p>
+        <div class="header-row">
+            <a href="index.html" class="pill pill-teal">← Back to Game</a>
+            <span class="pill pill-mono">KitchenAPI v2.0.0</span>
+        </div>
+    </header>
+
+    <section>
+        <h2>Overview</h2>
+        <div class="card">
+            <p>Five chefs, one grid kitchen. Orders arrive at reception stands listing the ingredients and states required. Your code drives the chefs with <code>KitchenAPI.command(chefId, stationId)</code>.</p>
+            <p>The first minute is playable by hand. After that, your code takes over. Three expired orders ends the run.</p>
+        </div>
+    </section>
+
+    <section>
+        <h2>Quick Start</h2>
+        <div class="card">
+            <ol>
+                <li>Open <a href="index.html">index.html</a> in a modern browser.</li>
+                <li>Open DevTools (<kbd>F12</kbd>) and switch to the Console.</li>
+                <li>Define a function and register it with <code>KitchenAPI.run(fn)</code>.</li>
+                <li>Click <strong>Start Game</strong> or call <code>KitchenAPI.start()</code>.</li>
+            </ol>
+        </div>
+    </section>
+
+    <section>
+        <h2>API Reference</h2>
+        <div class="card">
+            <div class="api-method">
+                <h3>KitchenAPI.version</h3>
+                <p>String. Current value: <code>"2.0.0"</code>.</p>
+            </div>
+
+            <div class="api-method">
+                <h3>KitchenAPI.run(fn)</h3>
+                <p>Registers <code>fn</code> to run once per frame. Signature: <code>fn(state, api, tick)</code> where <code>state</code> is a fresh <code>getState()</code> snapshot, <code>api</code> is <code>KitchenAPI</code>, <code>tick</code> is <code>{ dt, time }</code>. Survives <code>start()</code> and restarts. Calling <code>run()</code> again replaces the previous function.</p>
+            </div>
+
+            <div class="api-method">
+                <h3>KitchenAPI.stop()</h3>
+                <p>Unregisters the function set by <code>run()</code>. Does not stop the game.</p>
+            </div>
+
+            <div class="api-method">
+                <h3>KitchenAPI.plan(fn, opts)</h3>
+                <p>Registers an async function that runs on its own cadence (default <code>everyMs: 1000</code>, clamped 100 to 60000). Signature: <code>fn(state, api) → Promise&lt;policy&gt;</code>. Its return value becomes <code>state.policy</code> and is returned by <code>getPolicy()</code>. Re-entrant calls are skipped. The last good policy is preserved on error.</p>
+            </div>
+
+            <div class="api-method">
+                <h3>KitchenAPI.unplan()</h3>
+                <p>Unregisters the planner and clears <code>state.policy</code>.</p>
+            </div>
+
+            <div class="api-method">
+                <h3>KitchenAPI.getPolicy()</h3>
+                <p>Returns the latest <code>plan()</code> output, or <code>null</code>.</p>
+            </div>
+
+            <div class="api-method">
+                <h3>KitchenAPI.start()</h3>
+                <p>Starts or restarts the game. Resets stations, chefs, orders, and score. Clears raw event listeners. The function registered via <code>run()</code> survives.</p>
+            </div>
+
+            <div class="api-method">
+                <h3>KitchenAPI.togglePause()</h3>
+                <p>Toggles the pause state. Syncs with the in-game Pause button.</p>
+            </div>
+
+            <div class="api-method">
+                <h3>KitchenAPI.command(chefId, stationId)</h3>
+                <p>Routes the chef to a walkable tile next to the station and triggers the same interaction as a click. Returns <code>{ success, error? }</code>. Chef IDs: <code>0</code> to <code>4</code>. Station IDs: strings like <code>'bin_3'</code>, <code>'stove_0'</code>, <code>'reception_2'</code>. See the Station ID Reference.</p>
+            </div>
+
+            <div class="api-method">
+                <h3>KitchenAPI.boost(chefId)</h3>
+                <p>Brief movement speed boost with a cooldown. Same as pressing <kbd>B</kbd>.</p>
+            </div>
+
+            <div class="api-method">
+                <h3>KitchenAPI.selectChef(chefId)</h3>
+                <p>UI selection only. Does not move the chef.</p>
+            </div>
+
+            <div class="api-method">
+                <h3>KitchenAPI.clearListeners()</h3>
+                <p>Removes all event listeners registered via <code>on()</code> / <code>onTick()</code>. The <code>run()</code> function is re-attached automatically.</p>
+            </div>
+
+            <div class="api-method">
+                <h3>KitchenAPI.getState()</h3>
+                <p>Returns a plain snapshot of the game state.</p>
+                <div class="type-block">{
+  time, score, difficulty, phase, streak, bestStreak,
+  rush: { active, timeLeft, cooldown },
+  failedOrders, maxFailedOrders,
+  running, paused, gameOver,
+  chefs: [{
+    id, name, pos: [x, y],
+    holding: null | { ingredient, state } | { type: "plate", items },
+    busy, hasPath, boostActive, boostTime, boostCooldown, stall
+  }],
+  stations: {
+    ingredientBins:   [{ id, name, pos, ingredient }],
+    stoves:           [{ id, name, pos, cooking, cookTime, maxCookTime, ready, burnt }],
+    cuttingBoards:    [{ id, name, pos, busy, processing, processTime, maxProcessTime }],
+    platingAreas:     [{ id, name, pos, items }],
+    receptionStands:  [{ id, name, pos, order }],
+    trashCans:        [{ id, pos }],
+    counters:         [{ id, pos, items }]
+  },
+  orders:         [{ id, dish, timeLeft, standId, components }],
+  upcomingOrders: [{ dish, components, etaSeconds }],
+  policy,
+  recipes
+}</div>
+            </div>
+
+            <div class="api-method">
+                <h3>KitchenAPI.getRecipes()</h3>
+                <p>Returns an array of recipe metadata: <code>{ name, icon, difficulty, components }</code>.</p>
+            </div>
+        </div>
+    </section>
+
+    <section>
+        <h2>Events</h2>
+        <div class="card">
+            <p>Each registration returns an unsubscribe function: <code>const off = KitchenAPI.onTick(fn); off();</code></p>
+        </div>
+        <div class="card card-flush" style="margin-top:14px;">
+            <table>
+                <thead><tr><th>Method</th><th>Event</th><th>Payload</th></tr></thead>
+                <tbody>
+                    <tr><td><code>on(name, fn)</code></td><td>generic</td><td>varies</td></tr>
+                    <tr><td><code>onTick(fn)</code></td><td><code>tick</code></td><td><code>{ dt, time }</code></td></tr>
+                    <tr><td><code>onOrderSpawned(fn)</code></td><td><code>orderSpawned</code></td><td><code>{ id, dish, timeLeft, standId, components }</code></td></tr>
+                    <tr><td><code>onOrderExpired(fn)</code></td><td><code>orderExpired</code></td><td><code>{ id, dish, standId }</code></td></tr>
+                    <tr><td><code>onOrderDelivered(fn)</code></td><td><code>orderDelivered</code></td><td><code>{ id, dish, score, streak }</code></td></tr>
+                    <tr><td><code>onOrderFailed(fn)</code></td><td><code>orderFailed</code></td><td><code>{ dish }</code></td></tr>
+                    <tr><td><code>onPhaseChanged(fn)</code></td><td><code>phaseChanged</code></td><td><code>{ phase }</code></td></tr>
+                    <tr><td><code>onRushBurst(fn)</code></td><td><code>rushBurst</code></td><td><code>{ count }</code></td></tr>
+                    <tr><td><code>onGameOver(fn)</code></td><td><code>gameOver</code></td><td><code>{ score, time, bestStreak }</code></td></tr>
+                </tbody>
+            </table>
+        </div>
+    </section>
+
+    <section>
+        <h2>Station ID Reference</h2>
+        <div class="card card-flush">
+            <table>
+                <thead><tr><th>Station</th><th>ID pattern</th><th>Count</th></tr></thead>
+                <tbody>
+                    <tr><td>Ingredient bin</td><td><code>bin_0</code> to <code>bin_5</code></td><td>6</td></tr>
+                    <tr><td>Stove</td><td><code>stove_0</code> to <code>stove_2</code></td><td>3</td></tr>
+                    <tr><td>Cutting board</td><td><code>cutting_0</code>, <code>cutting_1</code></td><td>2</td></tr>
+                    <tr><td>Plating area</td><td><code>plating_0</code> to <code>plating_3</code></td><td>4</td></tr>
+                    <tr><td>Trash</td><td><code>trash_0</code></td><td>1</td></tr>
+                    <tr><td>Counter</td><td><code>counter_0</code> to <code>counter_N</code></td><td>~15</td></tr>
+                    <tr><td>Reception stand</td><td><code>reception_0</code> to <code>reception_4</code></td><td>5</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </section>
+
+    <section>
+        <h2>Recipes</h2>
+        <div class="card card-flush">
+            <table>
+                <thead><tr><th>Dish</th><th>Components (ingredient, state)</th></tr></thead>
+                <tbody>
+                    <tr><td>Salad</td><td>lettuce chopped, tomato chopped</td></tr>
+                    <tr><td>Steak</td><td>meat cooked</td></tr>
+                    <tr><td>Burger</td><td>meat cooked, dough raw</td></tr>
+                    <tr><td>Pizza</td><td>dough cooked, tomato chopped, cheese raw</td></tr>
+                    <tr><td>Deluxe Burger</td><td>meat cooked, dough raw, onion chopped</td></tr>
+                    <tr><td>Feast Platter</td><td>meat cooked, lettuce chopped, tomato chopped, cheese raw</td></tr>
+                    <tr><td>Supreme Pizza</td><td>dough cooked, tomato chopped, onion chopped, cheese raw</td></tr>
+                </tbody>
+            </table>
+        </div>
+        <div class="card" style="margin-top:14px;">
+            <p>How each ingredient reaches its target state, and the order in which it joins the plate, is yours to discover.</p>
+        </div>
+    </section>
+
+    <footer>
+        <p>Built for <strong>Hack the 6ix 2026</strong>, Toronto's largest summer hackathon.</p>
+        <p><a href="index.html">← Back to Game</a></p>
+    </footer>
+</div>
+</body>
+</html>
